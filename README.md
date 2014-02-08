@@ -1,6 +1,6 @@
 URL Expander
 ============
-version = 0.0.0.0
+version = 0.0.1.0
 license = [FreeBSD](http://stuart.nx15.at/2014/license.html)
 
 ## Development ##
