@@ -1,0 +1,266 @@
+#!/bin/bash
+# Copyright (c) 2008-2013 Stuart McCulloch Anderson <stuart@nxfifteen.me.uk>
+#                                                   <stuart.anderson@thesoftwaresociety.org.uk>
+# OpenPGP Key ID: A7EEB609 - FingerPrint: 299B6F75C137950F031F5DFAD4065F5EA7EEB609
+#
+# THIS FILE IS LICENCED UNDER A FREEBSD LICENCE. THE FULL TEXT OF WHICH CAN BE FOUND IN
+# THE LICENCE.md FILE INCLUDED WITH THIS FILE OF ONLINE AT HTTP://STUART.NX15.AT
+#
+GITCHANGED="0"
+
+function changes_in_git_repo () {
+  latestlocal=`git rev-parse HEAD`;
+  gitrepourl=`git remote -v | grep fetch | awk '{print $2}'`;
+  latestremote=`git ls-remote --heads $gitrepourl develop| awk '{print $1}'`;
+  if [ "$latestlocal" != "$latestremote" ]; then
+    return 1;
+  else
+    echo "####################### No Changes Since Last Commit #########################";
+    return 0;
+  fi
+}
+
+function mergeTrunk() {
+  if [ ! $1 ]; then
+    read -p "Merge this back into master? [y/n] (n) " -n 1 ; echo "";
+    if [[ ! $REPLY =~ ^[Yy]$ ]]
+    then
+      exit 2
+    fi
+  fi
+  git checkout master;
+  git fetch origin;
+  git merge origin/develop -m "Merge developments back into origin";
+  git push origin master;
+  git checkout develop;
+}
+
+
+function bumpVersion() {
+  versionFileName="$1"
+  tag="$2"
+
+  MaxValue=254    # highest valid IP octet value
+
+  CurrentVersion=`grep version $versionFileName | awk -F"= " '{print $2}'`
+  ProposedVersion="0.0.0.0"
+
+  ver_production="$(echo $CurrentVersion | cut -d. -f1)"
+  ver_releasecan="$(echo $CurrentVersion | cut -d. -f2)"
+  ver_build1="$(echo $CurrentVersion | cut -d. -f3)"
+  ver_build2="$(echo $CurrentVersion | cut -d. -f4)"
+
+  if [ "$tag" = "production" ]; then
+      echo "######################### Updating as new production"
+      ver_production=$(( $ver_production + 1 ))
+      ver_releasecan=0
+      ver_build2=0
+      ver_build1=0
+  elif [ "$tag" = "release" ]; then
+      echo "######################### Updating as new release"
+      ver_releasecan=$(( $ver_releasecan + 1 ))
+      ver_build2=0
+      ver_build1=0
+  elif [ "$tag" = "hotfix" ]; then
+      echo "######################### Updating as new hotfix"
+     ver_build2=$(( $ver_build2 + 1 ))
+  else
+      echo "######################### Updating as new build"
+     ver_build1=$(( $ver_build1 + 1 ))
+     ver_build2=0
+  fi
+
+  ProposedVersion="$ver_production.$ver_releasecan.$ver_build1.$ver_build2"
+
+  echo "Current verison $CurrentVersion, proposed new version will be $ProposedVersion" 
+
+  if [ ! $3 ]; then
+    read -p "Would you like to bump to this version? [y/n] (n) " -n 1 ; echo "";
+    if [[ ! $REPLY =~ ^[Yy]$ ]]
+    then
+      echo "Version bump skipped"
+      exit 2
+    fi
+  fi
+
+  if ! sed 's/^version = .*$/version = '$ProposedVersion'/g' $versionFileName > .tmp.new; then
+    echo "Could not replace version variable." >&2
+    exit 2
+  fi
+  mv .tmp.new $versionFileName
+  git add $versionFileName
+
+  if [ -f "README.md" ]; then
+    if ! sed 's/^version = .*$/version = '$ProposedVersion'/g' README.md > .tmp.new; then
+      echo "Could not replace version variable." >&2
+      exit 2
+    fi
+    mv .tmp.new README.md
+    git add README.md
+  fi
+
+  if [ "$GITCHANGED" == "1" ]; then
+    git commit --amend --no-edit
+  else
+    git commit -m "Bumped $CurrentVersion to $ProposedVersion"
+  fi  
+  git push
+
+  if git show-ref --tags --quiet --verify -- "refs/tags/v$ProposedVersion"; then
+    echo "######################### Tag $ProposedVersion already created"
+  else
+    if [ "$tag" = "production" ]; then
+        echo "######################### Tagging new Production Version"
+        git tag -a v$ProposedVersion -m "Production Version $ProposedVersion"
+        git push origin v$ProposedVersion;
+    elif [ "$tag" = "release" ]; then
+        echo "######################### Tagging new Release Version"
+        git tag -a v$ProposedVersion -m "Release Version $ProposedVersion"
+        git push origin v$ProposedVersion;
+    elif [ "$tag" = "hotfix" ]; then
+        echo "######################### Not Tagging Hot Fixs"
+        #git tag -a v$ProposedVersion -m "Hotfix $ProposedVersion"
+    else
+        echo "######################### Tagging new Build Version"
+        git tag -a v$ProposedVersion -m "Build Version $ProposedVersion"
+        git push origin v$ProposedVersion;
+    fi
+  fi
+
+  if [ "$4" = "updatevc" ] && [ -f ".gitlab_test.ini" ]; then
+    vc_tag=$(awk -F "= " '/vc_tag/ {print $2}' .gitlab_test.ini)
+    echo "######################### Updating version server"
+    ssh crememagnolia.nx.nxfifteen.me.uk /home/nxad/bin/gitlab_dns_version $vc_tag $ProposedVersion
+  fi
+}
+
+usage()
+{
+cat << EOF
+usage: $0 options
+
+OPTIONS:
+   -h      Show this message
+   -s      Bump Submodule version
+   -t      Upgrade tag [production|release|hotfix]
+   -a      Automate
+   -m      Merge back into master
+EOF
+}
+
+SUBMOD=
+TAG=
+AUTO=
+MERGE=
+FORCE=
+while getopts "ht:s:amf" OPTION
+do
+  case $OPTION in
+    h)
+      usage
+      exit 1
+      ;;
+    s)
+      SUBMOD=$OPTARG
+      ;;
+    t)
+      TAG=$OPTARG
+      ;;
+    a)
+      AUTO=1
+      ;;
+    m)
+      MERGE=1
+      ;;
+    f)
+      FORCE=1
+      ;;
+    ?)
+      usage
+      exit
+      ;;
+  esac
+done
+
+if [ -f `which bump-version` ]; then
+  sysBump=`which bump-version`
+  if [ -f "bump-version.sh" ]; then
+    rm "bump-version.sh";
+    cp "$sysBump" ./;
+    git add bump-version
+    if [ "$GITCHANGED" == "1" ]; then
+      git commit --amend --no-edit
+    else
+      git commit -m "Updated bump-version script"
+    fi
+  else
+    sysMd5=`md5sum $sysBump | awk '{ print $1 }'`
+    locMd5=`md5sum ./bump-version | awk '{ print $1 }'`
+    echo "Git HASH: $locMd5 -> $sysMd5"
+    echo "##############################################################################"
+    if [ ! "$locMd5" == "$sysMd5" ]; then
+      cp "$sysBump" ./;
+      if [ "$GITCHANGED" == "1" ]; then
+        git commit --amend --no-edit
+      else
+        git commit -m "Updated version bump file"
+      fi
+      echo "##############################################################################"
+      echo "Version Bump command updated updated from source, please re-run it"
+      exit 0
+    fi
+  fi
+fi
+
+changes_in_git_repo
+GITCHANGED=$?
+if [ "$FORCE" == "1" ] || [ "$GITCHANGED" == "1" ]; then
+  echo ""
+  echo "######################### Updating Version Numbering"
+  if [ `ls *.info` ]; then
+    bumpVersion `ls *.info` $TAG $AUTO updatevc
+  else
+    if [ -f "README.md" ]; then
+      bumpVersion README.md $TAG $AUTO
+    fi
+  fi
+
+  echo ""
+  echo "######################### Pushing Changed"
+  git push;
+
+  if [ $MERGE ]; then
+    echo ""
+    echo "######################### Merging branches"
+    mergeTrunk $AUTO
+  fi
+
+
+  if [ -f ".gitlab_test.ini" ]; then
+    echo ""
+    staggingServer=$(awk -F "= " '/stagging_server/ {print $2}' .gitlab_test.ini)
+    staggingUser=$(awk -F "= " '/stagging_username/ {print $2}' .gitlab_test.ini)
+    staggingDir=$(awk -F "= " '/stagging_dir/ {print $2}' .gitlab_test.ini)
+    if [ "$staggingServer" != "" ] && [ "$staggingUser" != "" ] && [ "$staggingDir" != "" ]; then
+      echo "######################### Staging Changes"
+      rsync -vhru --delete-before --quiet ./ $staggingUser@$staggingServer:$staggingDir
+    else
+      echo "######################### No Stagging Server Defined"
+    fi
+
+    echo ""
+    deployServer=$(awk -F "= " '/deploy_server/ {print $2}' .gitlab_test.ini)
+    deployUser=$(awk -F "= " '/deploy_username/ {print $2}' .gitlab_test.ini)
+    deployDir=$(awk -F "= " '/deploy_dir/ {print $2}' .gitlab_test.ini)
+    if [ "$deployServer" != "" ] && [ "$deployUser" != "" ] && [ "$deployDir" != "" ]; then
+      echo "######################### Deploying Changes"
+      ssh $deployUser@$deployServer "cd $deployDir; git pull"
+    else
+      echo "######################### No Deploy Server Defined"
+    fi
+  fi
+fi
+
+echo "##############################################################################"
+
+
